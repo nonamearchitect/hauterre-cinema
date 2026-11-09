@@ -65,14 +65,15 @@
 <div class="wrap" id="app" hidden>
   <header><img src="brand/hauterre-logo.png" alt="" /><span class="t">상영 관리</span><a href="/" target="_blank">극장 열기 ↗</a></header>
 
-  <div class="card" id="statsCard">
-    <h2>📊 관람 현황</h2>
-    <div class="sub" id="stSince"></div>
-    <div class="stats" id="stats"></div>
+  <div class="card" id="hfCard" hidden>
+    <h2>🔐 영구 보관 연결이 필요해요 (한 번만)</h2>
+    <div class="sub">지금은 업로드한 영상이 <b>서버가 잠들면 사라지는 임시 저장</b> 상태입니다. 아래를 한 번만 해 두면 영상과 상영목록이 Hugging Face에 영구 보관됩니다(무료).<br/>
+    1) <a href="https://huggingface.co/settings/tokens/new?tokenType=write" target="_blank" style="color:var(--gold)">Hugging Face 토큰 만들기</a> → 이름 아무거나, 종류 <b>Write</b> → 만든 토큰 복사<br/>
+    2) Render 서비스 → <b>Environment</b> → <code>HF_TOKEN</code> 값에 붙여넣고 저장 (자동 재시작)</div>
   </div>
 
   <div class="card">
-    <h2>① 영상 올리기</h2>
+    <h2>① 영상 올리기 <span id="upMode" style="font-size:12px;color:var(--gold);font-weight:500"></span></h2>
     <div class="sub">MP4 파일을 끌어다 놓거나 눌러서 선택하세요. 올라간 영상은 아래 상영목록에 자동으로 추가됩니다.<br/>최대 5GB · 권장: H.264 MP4, 1080p (관객 데이터 절약을 위해 2GB 이하로 압축 권장). 아이폰 HEVC(.mov) 영상은 브라우저에서 재생되지 않을 수 있습니다.</div>
     <div class="drop" id="drop"><b>여기에 영상 파일을 끌어다 놓기</b><br/><span style="color:var(--mut);font-size:12.5px">또는 클릭해서 선택 · 여러 개 가능</span></div>
     <input type="file" id="file" accept="video/mp4,video/webm,.mp4,.m4v,.webm" multiple hidden />
@@ -99,6 +100,12 @@
     <div class="lib" id="lib"></div>
   </div>
 
+  <div class="card" id="statsCard">
+    <h2>📊 관람 현황</h2>
+    <div class="sub" id="stSince"></div>
+    <div class="stats" id="stats"></div>
+  </div>
+
   <div class="save">
     <span class="msg" id="msg">변경 후 <b>적용하기</b>를 눌러야 극장에 반영됩니다.</span>
     <button class="btn gold" id="saveBtn">적용하기</button>
@@ -106,7 +113,8 @@
 </div>
 
 <script src="config.js"></script>
-<script>
+<script type="module">
+import { uploadFilesWithProgress, uploadFile, listFiles, deleteFile } from 'https://cdn.jsdelivr.net/npm/@huggingface/hub@2.17.10/+esm';
 const $ = (id) => document.getElementById(id);
 let KEY = sessionStorage.getItem('bc_admin') || '';
 let list = [], dirty = false;
@@ -127,7 +135,11 @@ async function login() {
 $('loginBtn').onclick = login; $('pw').onkeydown = (e) => e.key === 'Enter' && login();
 if (KEY) { $('pw').value = KEY; login(); }
 
+let HF = { ready: false };
 async function load() {
+  try { HF = await api('/api/hf'); } catch {}
+  $('hfCard').hidden = !!HF.ready;
+  $('upMode').textContent = HF.ready ? '· Hugging Face 영구 보관 (최대 50GB)' : '· 임시 저장 (서버 재시작 시 삭제)';
   const pl = await fetch('/api/playlist').then((r) => r.json()).catch(() => ({}));
   if (pl && pl.playlist) { list = pl.playlist.slice(); $('inter').value = pl.intermission; }
   else { list = (window.THEATER_CONFIG.playlist || []).slice(); $('inter').value = window.THEATER_CONFIG.intermission || 20; }
@@ -171,18 +183,28 @@ function render() {
     el.appendChild(d);
   });
 }
+const hfUrl = (path) => `https://huggingface.co/datasets/${HF.repo}/resolve/main/${path.split('/').map(encodeURIComponent).join('/')}`;
+async function hfFiles() {
+  const out = [];
+  try { for await (const f of listFiles({ repo: { type: 'dataset', name: HF.repo }, accessToken: HF.token, recursive: true })) if (f.type === 'file' && /\.(mp4|m4v|webm)$/i.test(f.path)) out.push({ src: hfUrl(f.path), path: f.path, size: f.size || 0 }); } catch (e) { console.warn(e); }
+  return out;
+}
 async function loadLib() {
   const el = $('lib'); el.innerHTML = '';
   try {
-    const { files } = await api('/api/media');
+    const { files } = HF.ready ? { files: await hfFiles() } : await api('/api/media');
     if (!files.length) el.innerHTML = '<div class="empty">아직 올린 파일이 없어요</div>';
     files.forEach((f) => {
       const d = document.createElement('div'); d.className = 'f';
       const inList = list.some((x) => x.src === f.src);
-      d.innerHTML = `<span>${esc(f.src.replace('media/', ''))} · ${mb(f.size)}</span><button class="btn sm" ${inList ? 'disabled style="opacity:.4"' : ''}>목록에 추가</button><button class="btn sm red">파일 삭제</button>`;
+      d.innerHTML = `<span>${esc((f.path || f.src).replace('media/', ''))} · ${mb(f.size)}</span><button class="btn sm" ${inList ? 'disabled style="opacity:.4"' : ''}>목록에 추가</button><button class="btn sm red">파일 삭제</button>`;
       const [add, del] = d.querySelectorAll('button');
-      add.onclick = () => { list.push({ src: f.src, title: f.src.replace(/^media\/\d+_[0-9a-f]+_/, '').replace(/\.\w+$/, '') }); setDirty(); render(); loadLib(); };
-      del.onclick = async () => { if (!confirm('이 파일을 서버에서 완전히 삭제할까요?')) return; try { await api('/api/media?src=' + encodeURIComponent(f.src), { method: 'DELETE' }); loadLib(); } catch (e) { alert(e.message); } };
+      add.onclick = () => { list.push({ src: f.src, title: decodeURIComponent(f.src.split('/').pop()).replace(/^\d+_[0-9a-f]+_/, '').replace(/\.\w+$/, '') }); setDirty(); render(); loadLib(); };
+      del.onclick = async () => {
+        if (list.some((x) => x.src === f.src)) return alert('상영목록에 있는 영상은 먼저 목록에서 빼고 적용해 주세요');
+        if (!confirm('이 파일을 완전히 삭제할까요? 되돌릴 수 없습니다.')) return;
+        try { if (HF.ready) await deleteFile({ repo: { type: 'dataset', name: HF.repo }, accessToken: HF.token, path: f.path }); else await api('/api/media?src=' + encodeURIComponent(f.src), { method: 'DELETE' }); loadLib(); } catch (e) { alert('삭제 실패: ' + e.message); }
+      };
       el.appendChild(d);
     });
   } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
@@ -195,9 +217,25 @@ fileIn.onchange = () => { [...fileIn.files].forEach(upload); fileIn.value = ''; 
 ['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('on'); }));
 ['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('on'); }));
 drop.addEventListener('drop', (e) => [...e.dataTransfer.files].forEach(upload));
+const safeName = (n) => { const ext = (n.match(/\.(mp4|m4v|webm)$/i) || ['.mp4'])[0].toLowerCase(); const base = n.replace(/\.\w+$/, '').normalize('NFKD').replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40); const d = new Date(); return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}_${Math.random().toString(16).slice(2, 8)}_${base || 'video'}${ext}`; };
+async function uploadHF(file, row) {
+  const st = row.querySelector('.st'), bar = row.querySelector('i');
+  const path = 'videos/' + safeName(file.name);
+  try {
+    const it = uploadFilesWithProgress({ repo: { type: 'dataset', name: HF.repo }, accessToken: HF.token, files: [{ path, content: file }], commitTitle: 'Upload ' + path });
+    for await (const ev of it) {
+      if (ev.event === 'phase') st.textContent = { preuploading: '준비 중…', uploadingLargeFiles: '업로드 중…', committing: '저장 중…' }[ev.phase] || ev.phase;
+      else if (ev.event === 'fileProgress') { const p = Math.round(ev.progress * 100); bar.style.width = p + '%'; st.textContent = (ev.state === 'hashing' ? '파일 확인 중 ' : '업로드 중 ') + p + '%'; }
+    }
+    st.textContent = '✓ 완료 · 상영목록에 추가하고 적용했어요';
+    list.push({ src: hfUrl(path), title: file.name.replace(/\.\w+$/, '') }); render(); loadLib();
+    await save(true);
+  } catch (e) { st.innerHTML = `<span class="warn">실패: ${esc(e.message || e)}</span>`; }
+}
 function upload(file) {
   const row = document.createElement('div'); row.innerHTML = `${esc(file.name)} · ${mb(file.size)} <span class="st">업로드 중…</span><div class="bar"><i></i></div>`; $('ups').appendChild(row);
   if (!/\.(mp4|m4v|webm)$/i.test(file.name)) { row.querySelector('.st').innerHTML = '<span class="warn">MP4 / WEBM 만 가능합니다</span>'; return; }
+  if (HF.ready) { busy++; uploadHF(file, row).finally(() => busy--); return; }
   const xhr = new XMLHttpRequest(); xhr.open('PUT', '/api/upload?name=' + encodeURIComponent(file.name));
   xhr.setRequestHeader('x-admin-key', KEY);
   xhr.upload.onprogress = (e) => { if (e.lengthComputable) { const p = e.loaded / e.total * 100; row.querySelector('i').style.width = p + '%'; row.querySelector('.st').textContent = p.toFixed(0) + '%'; } };
@@ -215,14 +253,17 @@ $('urlAdd').onclick = () => {
   list.push({ src: u, title: '브랜드 영상' }); $('urlIn').value = ''; setDirty(); render();
 };
 $('inter').oninput = () => setDirty();
-$('saveBtn').onclick = async () => {
+let busy = 0;
+async function save(auto = false) {
   try {
-    await api('/api/playlist', { method: 'POST', body: JSON.stringify({ playlist: list, intermission: +$('inter').value }) });
-    setDirty(false); $('msg').innerHTML = `✓ 적용 완료 · 지금 접속한 모든 관객 화면에서 <b>${$('inter').value}초 인터미션 후 1번 영상</b>부터 상영됩니다`;
-    loadLib();
+    const pl = await api('/api/playlist', { method: 'POST', body: JSON.stringify({ playlist: list, intermission: +$('inter').value }) });
+    if (HF.ready) await uploadFile({ repo: { type: 'dataset', name: HF.repo }, accessToken: HF.token, file: { path: 'playlist.json', content: new Blob([JSON.stringify(pl, null, 2)], { type: 'application/json' }) }, commitTitle: 'Update playlist' });
+    setDirty(false); $('msg').innerHTML = `✓ 적용 완료${HF.ready ? ' · 영구 저장됨' : ''} · 모든 관객 화면에서 <b>${$('inter').value}초 인터미션 후 1번 영상</b>부터 상영됩니다`;
+    if (!auto) loadLib();
   } catch (e) { alert('저장 실패: ' + e.message); }
-};
-addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+}
+$('saveBtn').onclick = () => save(false);
+addEventListener('beforeunload', (e) => { if (dirty || busy) { e.preventDefault(); e.returnValue = ''; } });
 </script>
 </body>
 </html>
