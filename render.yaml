@@ -15,3 +15,7 @@ services:
         value: /tmp/media
       - key: DATA_DIR
         value: /tmp/data
+      - key: HF_DATASET
+        value: yst3277/hauterre-videos   # 영상·상영목록을 영구 보관할 Hugging Face 데이터셋
+      - key: HF_TOKEN
+        sync: false                      # Hugging Face 'Write' 토큰 — Render 화면에서 직접 붙여넣기
