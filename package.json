@@ -1,0 +1,9 @@
+{
+  "name": "brand-cinema",
+  "version": "1.0.0",
+  "description": "Multiplayer 3D brand theatre (three.js + WebSocket relay)",
+  "private": true,
+  "scripts": { "start": "node server/relay.mjs" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "ws": "^8.18.0" }
+}

@@ -1,0 +1,17 @@
+# Render Blueprint (무료 플랜) — Render 에서 New > Blueprint 로 이 저장소를 고르면 자동 설정됩니다.
+services:
+  - type: web
+    name: hauterre-cinema
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: ADMIN_PASSWORD
+        generateValue: true   # 관리자 비밀번호 자동 생성 → Render 의 Environment 탭에서 확인
+      - key: MEDIA_DIR
+        value: /tmp/media
+      - key: DATA_DIR
+        value: /tmp/data
