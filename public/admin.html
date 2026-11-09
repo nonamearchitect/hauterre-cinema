@@ -115,6 +115,28 @@
 <script src="config.js"></script>
 <script type="module">
 import { uploadFilesWithProgress, uploadFile, listFiles, deleteFile } from 'https://cdn.jsdelivr.net/npm/@huggingface/hub@2.17.10/+esm';
+// in-browser video optimizer (WebCodecs): 4K / heavy files → 1080p H.264 ~6 Mbps, smooth for every viewer
+let MB = null; const mb_ = async () => (MB ||= await import('https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/+esm'));
+const CAN_OPT = typeof window.VideoEncoder === 'function';
+async function probe(src) {
+  const M = await mb_(); const input = new M.Input({ source: typeof src === 'string' ? new M.UrlSource(src) : new M.BlobSource(src), formats: M.ALL_FORMATS });
+  const vt = await input.getPrimaryVideoTrack(); const dur = await input.computeDuration();
+  const size = typeof src === 'string' ? +(await fetch(src, { method: 'HEAD' }).then((r) => r.headers.get('content-length')) || 0) : src.size;
+  const mbps = dur ? size * 8 / dur / 1e6 : 0;
+  return { w: vt?.displayWidth || 0, h: vt?.displayHeight || 0, dur, mbps, heavy: (vt && vt.displayHeight > 1080) || mbps > 10 };
+}
+async function optimize(src, onProgress) {
+  const M = await mb_();
+  const input = new M.Input({ source: typeof src === 'string' ? new M.UrlSource(src) : new M.BlobSource(src), formats: M.ALL_FORMATS });
+  const output = new M.Output({ format: new M.Mp4OutputFormat({ fastStart: 'in-memory' }), target: new M.BufferTarget() });
+  const conv = await M.Conversion.init({ input, output,
+    video: (t) => ({ codec: 'avc', bitrate: 6e6, forceTranscode: true, ...(t.displayWidth > 1920 ? { width: 1920 } : {}) }),
+    audio: (t) => (t.codec === 'aac' ? {} : { codec: 'aac', bitrate: 160000 }) });
+  if (!conv.isValid) throw new Error('이 영상은 변환할 수 없어요');
+  conv.onProgress = (p) => onProgress && onProgress(p);
+  await conv.execute();
+  return new Blob([output.target.buffer], { type: 'video/mp4' });
+}
 const $ = (id) => document.getElementById(id);
 let KEY = sessionStorage.getItem('bc_admin') || '';
 let list = [], dirty = false;
@@ -168,7 +190,7 @@ function render() {
     const d = document.createElement('div'); d.className = 'item';
     d.innerHTML = `<div class="n">${i + 1}</div><video muted preload="metadata" src="${esc(it.src)}#t=3"></video>
       <div><input type="text" value="${esc(it.title)}" maxlength="60" /><div class="meta">${esc(it.src)} <span class="dur"></span></div></div>
-      <div class="ctl"><button class="btn sm" data-a="up" title="위로">↑</button><button class="btn sm" data-a="down" title="아래로">↓</button><button class="btn sm red" data-a="rm">목록에서 빼기</button></div>`;
+      <div class="ctl">${HF.ready && CAN_OPT && /huggingface\.co\/datasets\//.test(it.src) && !/_1080p\.mp4$/.test(it.src) ? '<button class="btn sm" data-a="opt" title="끊김 없이 재생되도록 1080p로 변환">⚡ 최적화</button>' : ''}<button class="btn sm" data-a="up" title="위로">↑</button><button class="btn sm" data-a="down" title="아래로">↓</button><button class="btn sm red" data-a="rm">목록에서 빼기</button></div>`;
     const v = d.querySelector('video');
     v.onloadedmetadata = () => (d.querySelector('.dur').textContent = '· ' + fmt(v.duration));
     v.onerror = () => (d.querySelector('.dur').innerHTML = '<span class="warn">· ⚠ 브라우저에서 재생할 수 없는 형식입니다 (H.264 MP4 로 변환 필요)</span>');
@@ -178,6 +200,7 @@ function render() {
       if (a === 'up' && i > 0) [list[i - 1], list[i]] = [list[i], list[i - 1]];
       if (a === 'down' && i < list.length - 1) [list[i + 1], list[i]] = [list[i], list[i + 1]];
       if (a === 'rm') list.splice(i, 1);
+      if (a === 'opt') return optimizeItem(it, d);
       setDirty(); render();
     });
     el.appendChild(d);
@@ -220,14 +243,23 @@ drop.addEventListener('drop', (e) => [...e.dataTransfer.files].forEach(upload));
 const safeName = (n) => { const ext = (n.match(/\.(mp4|m4v|webm)$/i) || ['.mp4'])[0].toLowerCase(); const base = n.replace(/\.\w+$/, '').normalize('NFKD').replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40); const d = new Date(); return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}_${Math.random().toString(16).slice(2, 8)}_${base || 'video'}${ext}`; };
 async function uploadHF(file, row) {
   const st = row.querySelector('.st'), bar = row.querySelector('i');
-  const path = 'videos/' + safeName(file.name);
+  let path = 'videos/' + safeName(file.name), content = file;
   try {
-    const it = uploadFilesWithProgress({ repo: { type: 'dataset', name: HF.repo }, accessToken: HF.token, files: [{ path, content: file }], commitTitle: 'Upload ' + path });
+    if (CAN_OPT) {
+      st.textContent = '영상 분석 중…';
+      const info = await probe(file).catch(() => null);
+      if (info && info.heavy) {
+        st.textContent = `⚡ ${info.h}p · ${info.mbps.toFixed(0)}Mbps → 1080p 로 최적화 중 0%`;
+        content = await optimize(file, (p) => { bar.style.width = Math.round(p * 100) + '%'; st.textContent = `⚡ 1080p 로 최적화 중 ${Math.round(p * 100)}% (끊김 없는 재생을 위해)`; });
+        path = path.replace(/\.\w+$/, '_1080p.mp4'); bar.style.width = '0%';
+      }
+    }
+    const it = uploadFilesWithProgress({ repo: { type: 'dataset', name: HF.repo }, accessToken: HF.token, files: [{ path, content }], commitTitle: 'Upload ' + path });
     for await (const ev of it) {
       if (ev.event === 'phase') st.textContent = { preuploading: '준비 중…', uploadingLargeFiles: '업로드 중…', committing: '저장 중…' }[ev.phase] || ev.phase;
       else if (ev.event === 'fileProgress') { const p = Math.round(ev.progress * 100); bar.style.width = p + '%'; st.textContent = (ev.state === 'hashing' ? '파일 확인 중 ' : '업로드 중 ') + p + '%'; }
     }
-    st.textContent = '✓ 완료 · 상영목록에 추가하고 적용했어요';
+    st.textContent = content !== file ? `✓ 완료 · ${(content.size / 1048576).toFixed(0)}MB 로 최적화해 상영목록에 적용했어요` : '✓ 완료 · 상영목록에 추가하고 적용했어요';
     list.push({ src: hfUrl(path), title: file.name.replace(/\.\w+$/, '') }); render(); loadLib();
     await save(true);
   } catch (e) { st.innerHTML = `<span class="warn">실패: ${esc(e.message || e)}</span>`; }
@@ -254,6 +286,21 @@ $('urlAdd').onclick = () => {
 };
 $('inter').oninput = () => setDirty();
 let busy = 0;
+async function optimizeItem(it, row) {
+  const meta = row.querySelector('.meta'); const btn = row.querySelector('[data-a="opt"]'); btn.disabled = true;
+  busy++;
+  try {
+    meta.textContent = '영상 분석 중…';
+    const info = await probe(it.src);
+    if (!info.heavy) { meta.textContent = `이미 가벼운 영상이에요 (${info.h}p · ${info.mbps.toFixed(1)}Mbps)`; return; }
+    const blob = await optimize(it.src, (p) => (meta.textContent = `⚡ ${info.h}p · ${info.mbps.toFixed(0)}Mbps → 1080p 변환 중 ${Math.round(p * 100)}% (이 창을 닫지 마세요)`));
+    const path = 'videos/' + decodeURIComponent(it.src.split('/').pop()).replace(/\.\w+$/, '') + '_1080p.mp4';
+    for await (const ev of uploadFilesWithProgress({ repo: { type: 'dataset', name: HF.repo }, accessToken: HF.token, files: [{ path, content: blob }], commitTitle: 'Optimize ' + path }))
+      if (ev.event === 'fileProgress') meta.textContent = `업로드 중 ${Math.round(ev.progress * 100)}% (${(blob.size / 1048576).toFixed(0)}MB)`;
+    it.src = hfUrl(path); await save(true); render(); loadLib();
+  } catch (e) { meta.innerHTML = `<span class="warn">최적화 실패: ${esc(e.message || e)}</span>`; btn.disabled = false; }
+  finally { busy--; }
+}
 async function save(auto = false) {
   try {
     const pl = await api('/api/playlist', { method: 'POST', body: JSON.stringify({ playlist: list, intermission: +$('inter').value }) });
