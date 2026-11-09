@@ -15,6 +15,9 @@ const PUBLIC = path.resolve(__dirname, '..', 'public');
 const PORT = +process.env.PORT || 8080;
 const MEDIA_DIR = path.resolve(process.env.MEDIA_DIR || path.join(PUBLIC, 'media'));   // 업로드 영상 저장 위치
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));   // 상영목록 저장 위치
+// Hugging Face: permanent storage for videos + playlist (free). Token is a write token set as an env var on the host.
+const HF_TOKEN = process.env.HF_TOKEN || '';
+const HF_DATASET = process.env.HF_DATASET || '';
 const MAX_UPLOAD = (+process.env.MAX_UPLOAD_MB || 5120) * 1024 * 1024; // 기본 5GB
 fs.mkdirSync(MEDIA_DIR, { recursive: true }); fs.mkdirSync(DATA_DIR, { recursive: true });
 // first run on an empty media disk: copy the bundled demo video so the theatre plays something
@@ -47,6 +50,17 @@ function loadPlaylist() {
   try { return JSON.parse(fs.readFileSync(PL_FILE, 'utf8')); } catch { return null; }
 }
 let PL = loadPlaylist(); // null = use public/config.js defaults
+// on boot, restore the permanent playlist saved in the Hugging Face dataset (survives free-tier restarts)
+async function loadPlaylistFromHF() {
+  if (!HF_DATASET) return;
+  try {
+    const r = await fetch(`https://huggingface.co/datasets/${HF_DATASET}/resolve/main/playlist.json?t=${Date.now()}`, { headers: HF_TOKEN ? { authorization: 'Bearer ' + HF_TOKEN } : {} });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j && Array.isArray(j.playlist)) { PL = j; console.log(`  ▶ Hugging Face 상영목록 불러옴 (${j.playlist.length}편)`); for (const room of rooms.values()) broadcast(room, { t: 'playlist' }); }
+  } catch (e) { console.log('  (Hugging Face 상영목록 없음)'); }
+}
+setTimeout(loadPlaylistFromHF, 50);
 function savePlaylist(p) { PL = p; fs.writeFileSync(PL_FILE, JSON.stringify(p, null, 2)); }
 const validSrc = (s) => typeof s === 'string' && (/^media\/[\w.\-]+\.(mp4|webm|m4v)$/i.test(s) || /^https:\/\/[^\s"'<>]+$/i.test(s));
 function readBody(req, limit = 64 * 1024) {
@@ -59,6 +73,7 @@ async function api(req, res, url) {
   if (p === '/api/playlist' && req.method === 'GET') return json(res, 200, PL || { playlist: null });
   if (!isAdmin(req)) return json(res, 401, { error: '비밀번호가 올바르지 않습니다' });
   if (p === '/api/login') return json(res, 200, { ok: true });
+  if (p === '/api/hf') return json(res, 200, { repo: HF_DATASET, token: HF_TOKEN, ready: !!(HF_TOKEN && HF_DATASET) });
   if (p === '/api/stats') return json(res, 200, { ...STATS, online: totalOnline() });
   if (p === '/api/media' && req.method === 'GET') {
     const files = fs.readdirSync(MEDIA_DIR).filter((f) => /\.(mp4|webm|m4v)$/i.test(f)).map((f) => { const st = fs.statSync(path.join(MEDIA_DIR, f)); return { src: 'media/' + f, size: st.size, mtime: st.mtimeMs }; });
