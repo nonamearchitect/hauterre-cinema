@@ -143,7 +143,7 @@ function phase(nowMs) {
 function loadIdx(i) {
   if (currentIdx === i) return; currentIdx = i; videoTainted = false;
   const p = CFG.playlist[i]; const u = p._u || p.src; prepVideoEl(video, p.src);
-  if (video.src !== u) { video.src = u; video.load(); }
+  if (video.src !== u) { video.src = u; video._synced = false; video.load(); }
 }
 let lastMode = '';
 let audioUnlocked = false;
@@ -152,9 +152,17 @@ function syncVideo(ph) {
   loadIdx(ph.idx);
   if (ph.mode === 'play') {
     if (video.readyState >= 1) {
-      const drift = video.currentTime - ph.t;
-      if (Math.abs(drift) > 0.8) { try { video.currentTime = ph.t; } catch {} }
-      else video.playbackRate = THREE.MathUtils.clamp(1 - drift * 0.15, 0.92, 1.08);
+      // Sync gently: never seek while buffering (that causes a stall loop on heavy files).
+      // Jump only on first load or when far off and the player is healthy; otherwise nudge the speed.
+      const drift = video.currentTime - ph.t, now = performance.now();
+      const buffering = video.readyState < 3 || video.seeking;
+      const firstJump = !video._synced;
+      if (firstJump || (!buffering && Math.abs(drift) > 4 && now - (video._lastSeek || 0) > 15000)) {
+        try { video.currentTime = ph.t; } catch {}
+        video._synced = true; video._lastSeek = now;
+      } else if (!buffering) video.playbackRate = THREE.MathUtils.clamp(1 - drift * 0.1, 0.9, 1.1);
+      if (buffering && !video._bufToast && now - (video._lastSeek || 0) > 6000) { video._bufToast = true; toast('⏳ 영상을 불러오는 중이에요… 잠시만 기다려 주세요'); }
+      if (!buffering) video._bufToast = false;
     }
     if (video.paused) video.play().catch(() => { if (!video.muted) { video.muted = true; video.play().catch(() => {}); toast('🔊 화면을 한 번 눌러 소리를 켜 주세요'); } });
   } else {
