@@ -735,6 +735,18 @@ async function share() {
 }
 $('bShare').onclick = share;
 
+// admin mode inside the theatre: open the link with ?admin (or press Ctrl+Shift+A)
+function openAdmin() {
+  if (SANDBOXED) { toast('관리자 모드는 실제 서버 주소에서 사용할 수 있어요'); return; }
+  const w = $('adminWrap'), f = $('adminFrame');
+  if (!f.src) f.src = 'admin.html';
+  w.hidden = false; w.classList.remove('min'); $('bAdmin').classList.remove('hide');
+}
+$('bAdmin').onclick = () => { const w = $('adminWrap'); if (!w.hidden && !w.classList.contains('min')) w.classList.add('min'); else openAdmin(); };
+$('awClose').onclick = () => $('adminWrap').classList.add('min'); // keep the iframe alive so uploads continue
+if (params.has('admin')) { $('bAdmin').classList.remove('hide'); setTimeout(openAdmin, 600); }
+addEventListener('keydown', (e) => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'a') { e.preventDefault(); openAdmin(); } });
+
 // applause meter → CURTAIN CALL (every client sums the same broadcast events)
 let applause = 0, ccLock = 0;
 function bump(v) {
